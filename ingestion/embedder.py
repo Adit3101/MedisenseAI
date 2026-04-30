@@ -140,10 +140,10 @@ if __name__ == "__main__":
 
     # adjust imports depending on how you run the script
     from loader import load_mtsamples
-    from chunker import chunk_documents  # or your sentence-aware chunker
+    from new_chunker import chunk_documents_sentence_aware  # or your sentence-aware chunker
 
     docs = load_mtsamples(str(csv_path))
-    chunks, stats = chunk_documents(docs)
+    chunks, stats = chunk_documents_sentence_aware(docs)
 
     print("\nChunking stats:")
     print(stats)

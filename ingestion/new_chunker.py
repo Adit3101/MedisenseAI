@@ -34,7 +34,11 @@ def normalize_text_preserve_structure(text: str) -> str:
     text = re.sub(r"\s*,\s*([A-Z][A-Z0-9 /&\-]{2,40})\s*:\s*", r"\n\1:\n", text)
 
     text = text.strip()
-    text = re.sub(r"\n{2,}", "\n", text)
+    # Preserve section boundaries first
+    text = re.sub(r"\n{2,}", "\n\n", text)
+
+    # Then collapse single newlines inside sentences
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
 

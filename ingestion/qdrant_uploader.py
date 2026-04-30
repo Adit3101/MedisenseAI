@@ -58,6 +58,21 @@ def build_payload(chunk: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def create_payload_indexes(client: QdrantClient) -> None:
+    """Create indexes on filterable fields."""
+    from qdrant_client.models import PayloadSchemaType
+
+    fields = ["section", "specialty", "parent_doc_id"]
+
+    for field in fields:
+        print(f"Creating index on '{field}'...")
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name=field,
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+        print(f"   Index created for '{field}'")
+
 def upload_chunks(
     client: QdrantClient,
     chunks: List[Dict[str, Any]],
@@ -117,11 +132,11 @@ if __name__ == "__main__":
 
     # adjust these imports based on your package layout
     from loader import load_mtsamples
-    from chunker import chunk_documents  # or your sentence-aware chunker
+    from new_chunker import chunk_documents_sentence_aware  # or your sentence-aware chunker
     from embedder import embed_chunks
 
     docs = load_mtsamples(str(csv_path))
-    chunks, stats = chunk_documents(docs)
+    chunks, stats = chunk_documents_sentence_aware(docs)
     print(f"Chunk stats: {stats}")
 
     #  embedder API (new)
@@ -132,7 +147,12 @@ if __name__ == "__main__":
 
     client = get_qdrant_client()
     ensure_collection(client)
-    upload_chunks(client, valid_chunks, embeddings, batch_size=100)
+    create_payload_indexes(client)
+    info = client.get_collection(COLLECTION_NAME)
+    if info.points_count > 0:
+        print(f"⚠️  Collection already has {info.points_count} points. Skipping upload.")
+    else:
+        upload_chunks(client, valid_chunks, embeddings, batch_size=100)
 
     info = client.get_collection(COLLECTION_NAME)
     print("\nCollection info:")
