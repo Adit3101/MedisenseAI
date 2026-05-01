@@ -39,20 +39,12 @@ def get_client() -> QdrantClient:
 
 
 def infer_section(query: str) -> Optional[str]:
-    """
-    Very simple domain routing. Expand over time.
-    """
     q = query.lower()
 
-    # symptoms / complaints
     if "symptom" in q or "complaint" in q:
         return "SUBJECTIVE"
-
-    # diagnosis / impression
     if "diagnos" in q or "assessment" in q or "impression" in q:
         return "ASSESSMENT"
-
-    # treatment plan
     if "treat" in q or "medication" in q or "drug" in q or "plan" in q:
         return "PLAN"
 
@@ -63,35 +55,45 @@ def build_section_filter(section: Optional[str]) -> Optional[Filter]:
     if not section:
         return None
     return Filter(
-        must=[
-            FieldCondition(
-                key="section",
-                match=MatchValue(value=section),
-            )
-        ]
+        must=[FieldCondition(key="section", match=MatchValue(value=section))]
     )
 
 
 def dedupe_results(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen = set()
+    # Prefer stable IDs for dedupe
+    seen_ids = set()
     unique: List[Dict[str, Any]] = []
 
     for r in retrieved:
+        cid = r.get("chunk_id")
         text = (r.get("chunk_text") or "").strip()
-        if not text:
+        if not cid or not text:
             continue
-        if text in seen:
+        if cid in seen_ids:
             continue
-        seen.add(text)
+        seen_ids.add(cid)
         unique.append(r)
 
     return unique
 
 
-def search_chunks(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+def search_chunks(
+    query: str,
+    top_k: int = 10,
+    section: Optional[str] = None,
+    *,
+    use_section_routing: bool = True,
+    score_threshold: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     """
-    Search Qdrant for chunks most similar to the query.
-    Uses optional section routing -> section filter -> dedupe.
+    Search Qdrant for chunks most similar to query.
+
+    section behavior:
+      - if section is not None: force that section filter (even if empty string -> no filter)
+      - else if use_section_routing=True: infer_section(query)
+      - else: no section filter
+
+    score_threshold: drop results with score < threshold (optional)
     """
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string")
@@ -99,7 +101,6 @@ def search_chunks(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         raise ValueError("top_k must be > 0")
 
     model = get_model()
-
     query_vec = model.encode(
         [query],
         normalize_embeddings=True,
@@ -109,8 +110,12 @@ def search_chunks(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
 
     client = get_client()
 
-    section = infer_section(query)
-    query_filter = build_section_filter(section)
+    if section is not None:
+        resolved_section = section or None  # allow passing "" to mean no filter
+    else:
+        resolved_section = infer_section(query) if use_section_routing else None
+
+    query_filter = build_section_filter(resolved_section)
 
     results = client.query_points(
         collection_name=COLLECTION_NAME,
@@ -120,6 +125,14 @@ def search_chunks(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         with_payload=True,
         with_vectors=False,
     )
+    if not results.points and query_filter is not None:
+        results = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vec,
+            limit=top_k,
+            with_payload=True,
+            with_vectors=False,
+        )
 
     retrieved: List[Dict[str, Any]] = []
     for p in results.points:
@@ -135,30 +148,9 @@ def search_chunks(query: str, top_k: int = 10) -> List[Dict[str, Any]]:
             }
         )
 
-    return dedupe_results(retrieved)
+    retrieved = dedupe_results(retrieved)
 
+    if score_threshold is not None:
+        retrieved = [r for r in retrieved if float(r.get("score") or 0.0) >= score_threshold]
 
-if __name__ == "__main__":
-    queries = [
-        # Matches SUBJECTIVE sections
-        "patient presents with nasal congestion and allergic rhinitis",
-
-        # Matches ASSESSMENT sections
-        "diagnosis of morbid obesity requiring surgical intervention",
-
-        # Matches PLAN sections
-        "prescribed medication and follow up instructions",
-
-        # Matches cardiology notes
-        "left ventricular ejection fraction systolic function",
-
-        # Matches surgical notes
-        "laparoscopic procedure anesthesia endotracheal intubation",
-    ]
-
-    for query in queries:
-        print(f"\nQuery: {query}")
-        results = search_chunks(query, top_k=3)
-        for i, r in enumerate(results, 1):
-            print(f"  {i}. [{r['score']:.4f}] {r['specialty']} — {r['section']}")
-            print(f"      {r['chunk_text'][:120]}...")
+    return retrieved
