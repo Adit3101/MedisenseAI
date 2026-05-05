@@ -46,11 +46,16 @@ STRICT RULES:
 - Use ONLY the provided context.
 - If the answer is not explicitly supported, reply exactly:
   "I cannot find relevant information in the provided documents."
+- DO NOT use prior knowledge.
+- DO NOT guess.
 - Keep answers concise (2-5 sentences).
 - Cite sources like [1], [2] after each claim.
 
 Context:
-{context}"""
+{context}
+
+Question:
+{question}"""
 
 prompt = ChatPromptTemplate.from_messages(
     [
