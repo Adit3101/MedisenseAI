@@ -1,0 +1,10 @@
+langgraph
+langchain-core
+langchain-ollama
+sentence-transformers
+qdrant-client
+python-dotenv
+numpy
+torch
+tqdm
+transformers

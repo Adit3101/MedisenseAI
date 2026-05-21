@@ -13,7 +13,8 @@ load_dotenv()
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
-COLLECTION_NAME = "medisense_chunks"
+# V2 collection uses section-aware chunking + text index for hybrid search
+COLLECTION_NAME = "medisense_chunks_v2"
 VECTOR_SIZE = 384  # all-MiniLM-L6-v2
 
 
@@ -59,19 +60,41 @@ def build_payload(chunk: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def create_payload_indexes(client: QdrantClient) -> None:
-    """Create indexes on filterable fields."""
-    from qdrant_client.models import PayloadSchemaType
+    """Create indexes on filterable fields + full-text index for hybrid search."""
+    from qdrant_client.models import PayloadSchemaType, TextIndexParams, TokenizerType
 
-    fields = ["section", "specialty", "parent_doc_id"]
+    # Keyword indexes for filtering
+    keyword_fields = ["section", "specialty", "parent_doc_id"]
+    for field in keyword_fields:
+        print(f"Creating keyword index on '{field}'...")
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name=field,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            print(f"   Index created for '{field}'")
+        except Exception as e:
+            print(f"   Index for '{field}' may already exist: {e}")
 
-    for field in fields:
-        print(f"Creating index on '{field}'...")
+    # Full-text index on chunk_text for BM25/keyword search (Fix 2.2)
+    print("Creating full-text index on 'chunk_text' for hybrid search...")
+    try:
         client.create_payload_index(
             collection_name=COLLECTION_NAME,
-            field_name=field,
-            field_schema=PayloadSchemaType.KEYWORD,
+            field_name="chunk_text",
+            field_schema=TextIndexParams(
+                type="text",
+                tokenizer=TokenizerType.WORD,
+                min_token_len=2,
+                max_token_len=30,
+                lowercase=True,
+            ),
         )
-        print(f"   Index created for '{field}'")
+        print("   Full-text index created for 'chunk_text'")
+    except Exception as e:
+        print(f"   Full-text index may already exist: {e}")
+
 
 def upload_chunks(
     client: QdrantClient,
@@ -132,28 +155,40 @@ if __name__ == "__main__":
 
     # adjust these imports based on your package layout
     from loader import load_mtsamples
-    from new_chunker import chunk_documents_sentence_aware  # or your sentence-aware chunker
+    from new_chunker import chunk_documents_by_section  # NEW: section-aware chunker
     from embedder import embed_chunks
 
     docs = load_mtsamples(str(csv_path))
-    chunks, stats = chunk_documents_sentence_aware(docs)
+
+    # Use the new section-aware chunker
+    chunks, stats = chunk_documents_by_section(docs)
     print(f"Chunk stats: {stats}")
 
-    #  embedder API (new)
+    # Show doc_0 sections to verify correct splitting
+    doc0 = [c for c in chunks if c["parent_doc_id"] == "doc_0"]
+    print(f"\ndoc_0 (allergy): {len(doc0)} section-chunks")
+    for c in doc0:
+        print(f"  [{c['section']}] {c['chunk_text'][:80]}...")
+
+    # Embed all chunks
     valid_chunks, embeddings, skipped = embed_chunks(chunks, batch_size=64, normalize=True)
 
-    print(f"Embeddings: {embeddings.shape}")
+    print(f"\nEmbeddings: {embeddings.shape}")
     print(f"Skipped chunks: {len(skipped)}")
 
     client = get_qdrant_client()
     ensure_collection(client)
     create_payload_indexes(client)
+
     info = client.get_collection(COLLECTION_NAME)
     if info.points_count > 0:
         print(f"⚠️  Collection already has {info.points_count} points. Skipping upload.")
+        print(f"   To re-ingest, delete the collection first:")
+        print(f"   client.delete_collection('{COLLECTION_NAME}')")
     else:
-        upload_chunks(client, valid_chunks, embeddings, batch_size=100)
+        upload_chunks(client, valid_chunks, embeddings, batch_size=50)
 
     info = client.get_collection(COLLECTION_NAME)
     print("\nCollection info:")
+    print(f"  Collection: {COLLECTION_NAME}")
     print(f"  Points: {info.points_count}")

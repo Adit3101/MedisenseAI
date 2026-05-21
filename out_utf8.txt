@@ -1,0 +1,53 @@
+﻿python : WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+At line:1 char:1
++ python graph/orchestrator.py > out.txt 2>&1 ; Get-Content out.txt | O ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (WARNING: All lo...itten to STDERR:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+I0000 00:00:1778496869.642940   28972 port.cc:153] oneDNN custom operations are on. You may see slightly different 
+numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the 
+environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1778496874.386518   28972 port.cc:153] oneDNN custom operations are on. You may see slightly different 
+numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the 
+environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+C:\Users\aditg\AppData\Local\Programs\Python\Python312\Lib\site-packages\huggingface_hub\file_download.py:949: 
+FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when 
+possible. If you want to force a new download, use `force_download=True`.
+  warnings.warn(
+WARNING:tensorflow:From 
+C:\Users\aditg\AppData\Local\Programs\Python\Python312\Lib\site-packages\tf_keras\src\losses.py:2976: The name 
+tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy 
+instead.
+
+Query: What medications was the allergy patient prescribed?
+
+[Retriever] Searching: What medications was the allergy patient prescribed?
+Loading retrieval embedding model: sentence-transformers/all-MiniLM-L6-v2
+[Retriever] Hybrid search returned 20 chunks
+[Retriever] After parent expansion: 88 chunks
+Loading reranker: cross-encoder/ms-marco-MiniLM-L-6-v2
+[Retriever] After reranking: 10 chunks
+[NER] Extracting entities
+Loading NER model: d4data/biomedical-ner-all
+[NER] Found: 9 drugs, 0 conditions, 1 dosages
+[Summarizer] Summarizing context
+Loading summarizer: facebook/bart-large-cnn
+[Answer] Generating grounded answer
+[Critic] Evaluating answer
+[Router] Done ù answer looks good
+
+============================================================
+FINAL ANSWER:
+According to [3] PLAN, the patient was prescribed Nasonex (two sprays in each nostril for three weeks). A prescription was also written.
+
+ENTITIES:
+{'drugs': ['Atenolol', 'Sodium bicarbonate', 'Lovaza', 'Dialyvite', 'Ortho Tri-Cyclen', 'Zyrtec', 'Allegra', 'Loratadine', 'Nasonex'], 'conditions': [], 'dosages': ['Two sprays']}
+
+SUMMARY:
+Her only medication currently is Ortho Tri-Cyclen and the Allegra. She will try Zyrtec instead of Allegra again. Another option will be to use loratadine. Samples of Nasonex two sprays in each nostril given for three weeks.
+
+CRITIQUE: answer looks good
+CONFIDENCE: 1.0
+RETRIES: 0

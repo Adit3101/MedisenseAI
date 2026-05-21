@@ -1,203 +1,197 @@
+"""
+agents/summarizer_agent.py
+
+Extractive summarization — no model download required.
+
+Replaces facebook/bart-large-cnn (which was trained on news and
+produces fragmented output on clinical SOAP notes).
+
+Algorithm:
+1. Split context into sentences.
+2. Score each sentence by:
+   - TF-IDF overlap with the query
+   - Section weight (PLAN/ASSESSMENT sentences score highest)
+   - Position weight (early sentences in PLAN sections score slightly higher)
+3. Return top-N sentences joined in document order.
+"""
 from __future__ import annotations
 
+import math
 import re
-from typing import Optional
-from transformers import pipeline, AutoTokenizer
+from collections import Counter
+from typing import List, Optional, Dict
 
-MODEL_NAME = "facebook/bart-large-cnn"
-MAX_INPUT_TOKENS = 900
-MIN_SUMMARY_LEN = 20
+# Sections whose sentences get a scoring bonus
+SECTION_WEIGHTS: Dict[str, float] = {
+    "PLAN":             2.0,
+    "ASSESSMENT":       1.8,
+    "IMPRESSION":       1.8,
+    "IMPRESSION/PLAN":  2.0,
+    "MEDICATIONS":      1.7,
+    "CURRENT MEDICATIONS": 1.7,
+    "SUBJECTIVE":       1.2,
+    "HPI":              1.2,
+    "HISTORY OF PRESENT ILLNESS": 1.2,
+    "ALLERGIES":        1.5,
+    "FINDINGS":         1.4,
+}
 
-_summarizer = None
-_tokenizer = None
-
-
-def get_summarizer():
-    global _summarizer
-    if _summarizer is None:
-        print(f"Loading summarizer: {MODEL_NAME}")
-        _summarizer = pipeline(
-            "summarization",
-            model=MODEL_NAME,
-            framework="pt",
-        )
-    return _summarizer
-
-
-def get_tokenizer():
-    global _tokenizer
-    if _tokenizer is None:
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    return _tokenizer
+# Maximum sentences to include in the summary
+MAX_SUMMARY_SENTENCES = 6
+MAX_SUMMARY_CHARS = 800
 
 
-def clean_text(text: str) -> str:
-    """Strip common noisy clinical headers."""
-    return re.sub(
-        r"(HISTORY OF PRESENT ILLNESS:|PAST MEDICAL HISTORY:|CHIEF COMPLAINT:|ASSESSMENT:|PLAN:)",
-        "",
-        text,
-        flags=re.I,
-    ).strip()
+def _tokenize(text: str) -> List[str]:
+    """Simple lowercase word tokenizer — remove stop words."""
+    STOP_WORDS = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "can", "of", "in", "on", "at",
+        "to", "for", "with", "by", "from", "and", "or", "but", "if", "as",
+        "this", "that", "these", "those", "it", "its", "he", "she", "they",
+        "we", "you", "i", "his", "her", "their", "our", "your", "my",
+        "not", "no", "nor", "so", "yet",
+    }
+    tokens = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+    return [t for t in tokens if t not in STOP_WORDS]
 
 
-def clean_generated(text: str) -> str:
+def _tfidf_score(sentence_tokens: List[str], query_tokens: List[str]) -> float:
+    """Simple TF-IDF overlap between sentence and query."""
+    if not sentence_tokens or not query_tokens:
+        return 0.0
+    query_set = set(query_tokens)
+    matches = sum(1 for t in sentence_tokens if t in query_set)
+    # Normalize by sentence length (avoid rewarding very long sentences blindly)
+    tf = matches / max(1, len(sentence_tokens))
+    # IDF-like weighting: rare query terms matter more
+    return tf * math.log(1 + len(query_tokens))
+
+
+def _detect_section_from_text(text: str) -> str:
+    """Detect section from the chunk text prefix (e.g. 'Section: PLAN')."""
+    match = re.search(r"Section:\s*([A-Z /&\-]+)", text)
+    if match:
+        return match.group(1).strip().upper()
+    return "UNKNOWN"
+
+
+def _split_sentences(text: str) -> List[str]:
+    """Split text into sentences, handling clinical list items."""
+    # Handle numbered list items (e.g., "1. Furosemide 20mg daily")
+    text = re.sub(r'(\d+\.\s)', r'\n\1', text)
+    # Standard sentence split
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    result = []
+    for s in sentences:
+        s = s.strip()
+        if len(s.split()) >= 3:  # skip very short fragments
+            result.append(s)
+    return result
+
+
+def summarize_text(
+    text: str,
+    query: Optional[str] = None,
+    max_sentences: int = MAX_SUMMARY_SENTENCES,
+) -> str:
     """
-    - Remove instruction echoes
-    - Remove repeated tokens/artifacts
-    - Strip leading punctuation
-    - Normalize whitespace
-    - Capitalize first letter
+    Extractive summarization: score each sentence and return the top ones.
+
+    Args:
+        text: combined chunk texts
+        query: the user query (used for TF-IDF scoring). If None, use pure
+               section-based scoring.
+        max_sentences: max number of sentences to include
+
+    Returns:
+        A summary string.
     """
-    text = re.sub(r"Summarize.*?:", "", text, flags=re.I)
-    text = re.sub(r"\b(\w+)( \1){2,}\b", r"\1", text)  # collapse repeated words
-    text = re.sub(r"^[\s,;:]+", "", text)  # leading punctuation
-    text = re.sub(r"\s+", " ", text).strip()
-    if text:
-        text = text[0].upper() + text[1:]
-    return text
+    if not text or not text.strip():
+        return "No content to summarize."
+
+    # Strip all chunker-added metadata lines (can appear anywhere in combined text)
+    clean = re.sub(r"Patient Specialty:[^\n]*\n?", "", text)
+    clean = re.sub(r"Section:\s*[A-Z0-9 /&\-]+\n?", "", clean)
+    # Strip residual comma-list artifacts (e.g. ",1. Drug" -> "1. Drug")
+    clean = re.sub(r"^[,\s]+", "", clean, flags=re.MULTILINE)
+    clean = clean.strip()
+
+    if not clean:
+        return "No content to summarize."
+
+    # Detect section for bonus scoring
+    section = _detect_section_from_text(text)
+    section_bonus = SECTION_WEIGHTS.get(section, 1.0)
+
+    query_tokens = _tokenize(query) if query else []
+    sentences = _split_sentences(clean)
+
+    if not sentences:
+        return clean[:MAX_SUMMARY_CHARS]
+
+    # Score each sentence
+    scored: List[tuple] = []
+    for idx, sent in enumerate(sentences):
+        sent_tokens = _tokenize(sent)
+
+        tfidf = _tfidf_score(sent_tokens, query_tokens) if query_tokens else 0.0
+        position_bonus = 1.0 / (1 + idx * 0.1)  # earlier sentences slightly favored
+        score = (tfidf + position_bonus) * section_bonus
+
+        scored.append((score, idx, sent))
+
+    # Sort by score descending, keep top N, then restore original order
+    top = sorted(scored, key=lambda x: -x[0])[:max_sentences]
+    top = sorted(top, key=lambda x: x[1])  # restore document order
+
+    summary = " ".join(sent for _, _, sent in top)
+
+    # Trim to max chars
+    if len(summary) > MAX_SUMMARY_CHARS:
+        summary = summary[:MAX_SUMMARY_CHARS].rsplit(" ", 1)[0] + "…"
+
+    return summary
 
 
-def get_lengths(text):
-    words = len(text.split())
-    max_len = min(300, max(120, words // 2))   # 🔼 increase more
-    min_len = max(60, max_len // 3)
-    return min_len, max_len
-
-def split_sections(text):
-    return re.split(
-        r"(HISTORY OF PRESENT ILLNESS:|ASSESSMENT:|PLAN:|PROCEDURE:)",
-        text,
-        flags=re.I
-    )
-
-def chunk_text_for_summary(text: str, max_tokens: int = MAX_INPUT_TOKENS) -> list[str]:
-    """Token-aware chunking."""
-    tokenizer = get_tokenizer()
-    tokens = tokenizer.encode(text, truncation=False)
-
-    chunks = []
-    for i in range(0, len(tokens), max_tokens):
-        chunk_tokens = tokens[i:i + max_tokens]
-        chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
-        if chunk_text.strip():
-            chunks.append(chunk_text)
-
-    return chunks
-
-
-def summarize_text(text: str, _depth: int = 0) -> str:
+def summarize_chunks(
+    chunks: List[Dict],
+    query: Optional[str] = None,
+    max_sentences: int = MAX_SUMMARY_SENTENCES,
+) -> str:
     """
-    Map-reduce summarization with fixes applied.
-    _depth: recursion guard for long reductions.
+    Summarize a list of chunk dicts directly, respecting section ordering.
+    Used by the orchestrator summarizer_node.
     """
-    if _depth > 2:
-        tokenizer = get_tokenizer()
-        tokens = tokenizer.encode(text, truncation=True, max_length=MAX_INPUT_TOKENS)
-        text = tokenizer.decode(tokens, skip_special_tokens=True)
-        summarizer = get_summarizer()
-        min_len, max_len = get_lengths(text)
-        result = summarizer(
-            text,
-            max_length=max_len,
-            min_length=min_len,
-            do_sample=False,
-            repetition_penalty=2.0,
-            no_repeat_ngram_size=3,
-        )
-        return clean_generated(result[0]["summary_text"])
-
-    summarizer = get_summarizer()
-    text = clean_text(text)
-    chunks = chunk_text_for_summary(text)
-
     if not chunks:
-        return "No text to summarize."
+        return "No chunks to summarize."
 
-    results = []
-    for chunk in chunks:
-        min_len, max_len = get_lengths(chunk)
-        result = summarizer(
-            chunk,
-            max_length=max_len,
-            min_length=min_len,
-            do_sample=False,
-            repetition_penalty=2.0,
-            no_repeat_ngram_size=3,
-        )
-        results.append(clean_generated(result[0]["summary_text"]))
+    # Sort chunks by section priority so PLAN/ASSESSMENT text comes first
+    def section_rank(c: Dict) -> float:
+        sec = (c.get("section") or "UNKNOWN").upper()
+        weight = SECTION_WEIGHTS.get(sec, 1.0)
+        return -weight  # negate for ascending sort
 
-    if len(results) == 1:
-        return results[0]
+    sorted_chunks = sorted(chunks, key=section_rank)
 
-    combined = "\n".join(results)
-
-    if len(combined.split()) > 800:
-        print(f"  Combined summaries too long ({len(combined.split())} words), reducing recursively...")
-        return summarize_text(combined, _depth=_depth + 1)
-
-    # print(f"  Reducing {len(results)} summaries into final...")
-    # min_len, max_len = get_lengths(combined)
-    # combined = " ".join(results)
-    #
-    # final = summarizer(
-    #     combined,
-    #     max_length=max_len,
-    #     min_length=min_len,
-    #     do_sample=False,
-    #     repetition_penalty=2.0,
-    #     no_repeat_ngram_size=3,
-    # )
-    # return clean_generated(final[0]["summary_text"])
-    combined = " ".join(results)
-
-    template = f"""
-    Summarize the clinical note with the following structure:
-
-    Patient:
-    Condition:
-    History:
-    Treatment/Plan:
-    Risks:
-
-    Text:
-    {combined}
-    """
-
-    min_len, max_len = get_lengths(combined)
-
-    final = summarizer(
-        template,
-        max_length=max_len,
-        min_length=min_len,
-        do_sample=False,
-        repetition_penalty=2.0,
-        no_repeat_ngram_size=3,
+    combined = "\n\n".join(
+        c.get("chunk_text", "") for c in sorted_chunks[:6]
     )
+    return summarize_text(combined, query=query, max_sentences=max_sentences)
 
-    return clean_generated(final[0]["summary_text"])
 
 if __name__ == "__main__":
-    from pathlib import Path
-    import sys
+    sample = """
+Patient Specialty: Allergy / Immunology
+Section: MEDICATIONS
 
-    BASE_DIR = Path(__file__).resolve().parent.parent
-    sys.path.append(str(BASE_DIR))
-    from ingestion.loader import load_mtsamples
+Her only medication currently is Ortho Tri-Cyclen and the Allegra.
 
-    DATA_PATH = BASE_DIR / "data" / "raw" / "mtsamples.csv"
+Patient Specialty: Allergy / Immunology
+Section: PLAN
 
-    print(f"Loading data from: {DATA_PATH}")
-    print(f"Exists: {DATA_PATH.exists()}")
-
-    docs = load_mtsamples(str(DATA_PATH))
-    long_doc = next(d for d in docs if len((d["text"] or "").split()) > 400)
-
-    print(f"\nDocument: {long_doc['id']}")
-    print(f"Specialty: {long_doc['medical_specialty']}")
-    print(f"Word count: {len(long_doc['text'].split())}")
-    print(f"\nSummarizing...")
-
-    summary = summarize_text(long_doc["text"])
-
-    print(f"\nSummary:\n{summary}")
+She will try Zyrtec instead of Allegra again. Another option will be to use loratadine.
+Samples of Nasonex two sprays in each nostril given for three weeks. A prescription was written as well.
+    """
+    query = "What medications was the allergy patient prescribed?"
+    print(summarize_text(sample, query=query))

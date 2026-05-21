@@ -11,8 +11,8 @@ from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 # Temporary import approach; later convert repo to a package and remove sys.path hacking
-sys.path.append(str(Path(__file__).resolve().parent.parent / "ingestion"))
-from ingestion.retriver import search_chunks
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from ingestion.retriver import search_chunks, hybrid_search, expand_with_parent_chunks
 
 load_dotenv()
 
@@ -82,6 +82,11 @@ def dedupe_chunks_by_id(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def format_context(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    """Format chunks as numbered context blocks.
+
+    Fix 1.3: Reverse order so highest-scored chunks appear LAST
+    (closest to the question), combating LLM primacy bias.
+    """
     parts: List[str] = []
     total = 0
 
@@ -97,6 +102,8 @@ def format_context(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CH
         parts.append(block)
         total += len(block)
 
+    # Reverse: put best chunks closest to the question (end of context)
+    parts.reverse()
     return "\n\n---\n\n".join(parts)
 
 
